@@ -1,0 +1,20 @@
+{
+    "manufacturer": "polycab",
+    "model": "SilencioMini (400 RPM) Test Fan",
+    "specifications": {
+        "sweep_diameter": 0.9,
+        "bldc_efficiency": 0.15,
+        "torque_consistency": 1,
+        "power_factor": 0.98,
+        "blade_count": 3
+    },
+    "speed_settings": {
+        "1": 120,
+        "2": 165,
+        "3": 210,
+        "4": 250,
+        "5": 295,
+        "6": 335,
+        "Boost": 380
+    }
+}
