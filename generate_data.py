@@ -190,20 +190,23 @@ def generate_temperature_cycles(timestamps: List[datetime]) -> Tuple[np.ndarray,
     
     return outdoor_temps, indoor_temps
 
-def generate_starting_temperature(num_samples: int) -> np.ndarray:
+def generate_starting_temperature(indoor_temps: np.ndarray) -> np.ndarray:
     """
-    Generate starting indoor temperatures using log-normal distribution
+    Generate starting indoor temperatures with normally distributed difference from indoor temperature
     
     Parameters:
-    - num_samples: Number of samples to generate
+    - indoor_temps: Array of indoor temperatures without AC
     
     Returns:
     - np.ndarray: Array of starting temperatures
     """
-    mu = np.log(25.5)
-    sigma = 0.08
-    temps = np.random.lognormal(mu, sigma, num_samples)
-    return np.clip(temps, 24, 30)
+    # Generate temperature differences using truncated normal distribution
+    temp_differences = np.random.normal(2.5, 0.5, len(indoor_temps))  # mean=2.5, std=0.5
+    temp_differences = np.clip(temp_differences, 1, 4)  # Ensure differences are between 1-4 degrees
+    print(temp_differences)
+    # Calculate starting temperatures
+    starting_temps = indoor_temps - temp_differences
+    return np.clip(starting_temps, 24, 30)  # Maintain original bounds
 
 def generate_ac_capacity(num_samples: int) -> np.ndarray:
     """
@@ -221,7 +224,7 @@ def generate_ac_capacity(num_samples: int) -> np.ndarray:
 
 def generate_humidity(timestamps: List[datetime]) -> np.ndarray:
     """
-    Generate humidity based on season and time
+    Generate humidity based on season and time with skewed distribution between 20-65%
     
     Parameters:
     - timestamps: List of datetime objects
@@ -232,22 +235,20 @@ def generate_humidity(timestamps: List[datetime]) -> np.ndarray:
     num_samples = len(timestamps)
     humidity = np.zeros(num_samples)
     
-    humidity_ranges = {
-        'summer': (30, 50),
-        'monsoon': (70, 90),
-        'post-monsoon': (50, 70),
-        'winter': (40, 60)
-    }
+    # Using beta distribution to create skewed values
+    a, b = 3.0, 1.5  # Shape parameters for beta distribution - increased a for more concentration in 50-60 range
     
     for i, ts in enumerate(timestamps):
-        season = get_season(ts)
-        base_range = humidity_ranges[season]
-        base_humidity = np.random.uniform(base_range[0], base_range[1])
+        # Generate base humidity using beta distribution
+        base_humidity = np.random.beta(a, b)
+        # Scale to desired range (20-60), leaving room for occupancy effects
+        base_humidity = 20 + (base_humidity * 40)  # Scales to 20-60 range
         
+        # Add small time-based variation
         hour = ts.hour + ts.minute/60
-        time_variation = -10 * np.sin((2 * np.pi / 24) * (hour - 14))
+        time_variation = -3 * np.sin((2 * np.pi / 24) * (hour - 14))  # Reduced variation
         
-        humidity[i] = np.clip(base_humidity + time_variation, 30, 90)
+        humidity[i] = np.clip(base_humidity + time_variation, 20, 60)  # Clip to slightly lower max
     
     return humidity
 
@@ -265,10 +266,10 @@ def generate_air_velocity(timestamps: List[datetime]) -> np.ndarray:
     velocity = np.zeros(num_samples)
     
     velocity_params = {
-        'summer': {'mean': 0.6, 'sigma': 0.2},
-        'monsoon': {'mean': 0.5, 'sigma': 0.3},
-        'post-monsoon': {'mean': 0.3, 'sigma': 0.2},
-        'winter': {'mean': 0.1, 'sigma': 0.2}
+        'summer': {'mean': 0.2, 'sigma': 0.025},
+        'monsoon': {'mean': 0.1, 'sigma': 0.03},
+        'post-monsoon': {'mean': 0.05, 'sigma': 0.02},
+        'winter': {'mean': 0.01, 'sigma': 0.015}
     }
     
     for i, ts in enumerate(timestamps):
@@ -371,16 +372,16 @@ def generate_metabolic_rates(timestamps: List[datetime], age_groups: np.ndarray)
         time_block = get_time_block(hour)
         
         if time_block == 'early_morning':
-            base_met = np.random.uniform(2.0, 2.5)
+            base_met = np.random.uniform(0.8, 0.9)
         elif time_block in ['morning', 'afternoon']:
-            base_met = np.random.uniform(1.0, 1.6)
+            base_met = np.random.uniform(1.0, 1.1)
         elif time_block == 'evening':
-            base_met = np.random.uniform(1.4, 2.0)
+            base_met = np.random.uniform(0.9, 1.0)
         else:
             base_met = np.random.uniform(0.7, 1.0)
         
         met_rates[i] = adjust_metabolic_rate_for_age(base_met, age_groups[i])
-        met_rates[i] += np.random.normal(0, 0.1)
+        met_rates[i] += np.random.normal(0, 0.05)
     
     return np.clip(met_rates, 0.7, 2.5)
 
@@ -418,6 +419,7 @@ def generate_clothing_insulation(timestamps: List[datetime]) -> np.ndarray:
     
     return clo
 
+
 def calculate_room_effects(base_temp: float, base_humidity: float, 
                          num_occupants: int, room_volume: float) -> Tuple[float, float, float]:
     """
@@ -439,10 +441,11 @@ def calculate_room_effects(base_temp: float, base_humidity: float,
     delta_T = (heat_gain_per_person * num_occupants * 3600) / (air_specific_heat * air_density * room_volume)
     new_temp = base_temp + min(delta_T, 3)
     
-    water_vapor_per_person = 50  # g/hour
+    # humidity calculation
+    water_vapor_per_person = 10  # Assumption
     room_air_mass = room_volume * air_density
-    humidity_increase = (water_vapor_per_person * num_occupants) / room_air_mass * 10
-    new_humidity = min(base_humidity + humidity_increase, 90)
+    humidity_increase = (water_vapor_per_person * num_occupants) / room_air_mass * 5  # Reduced multiplier from 10 to 5
+    new_humidity = np.clip(base_humidity + humidity_increase, 20, 65)  # Explicitly clip to desired range
     
     velocity_factor = 1 + (num_occupants - 1) * 0.1
     
@@ -451,15 +454,7 @@ def calculate_room_effects(base_temp: float, base_humidity: float,
 def simulate_thermal_comfort(timestamps: List[datetime], room_size: int = 5, 
                            room_volume: float = 36) -> Dict[str, Any]:
     """
-    Main simulation function
-    
-    Parameters:
-    - timestamps: List of datetime objects
-    - room_size: Maximum room occupancy
-    - room_volume: Room volume in m³
-    
-    Returns:
-    - Dictionary containing all simulation results
+    Simulate thermal comfort for multiple occupants with corrected temperature handling
     """
     num_samples = len(timestamps)
     
@@ -468,28 +463,32 @@ def simulate_thermal_comfort(timestamps: List[datetime], room_size: int = 5,
     base_humidity = generate_humidity(timestamps)
     base_air_velocity = generate_air_velocity(timestamps)
     
-    # Generate new columns
-    starting_temps = generate_starting_temperature(num_samples)
-    ac_capacities = generate_ac_capacity(num_samples)
+    # Generate starting temperatures (AC sensor temps) with variable difference from indoor temp
+    temp_differences = np.random.normal(2.5, 0.5, len(base_indoor_temp))  # mean=2.5, std=0.5
+    temp_differences = np.clip(temp_differences, 1, 4)  # Ensure differences are between 1-4 degrees
+    starting_temps = base_indoor_temp - temp_differences
+    starting_temps = np.clip(starting_temps, 24, 30)
     
-    # Generate occupancy pattern
+    ac_capacities = generate_ac_capacity(num_samples)
     occupancy = generate_occupancy_pattern(timestamps, room_size)
     
-    # Initialize arrays
-    indoor_temps = np.zeros((num_samples, room_size))
-    humidities = np.zeros((num_samples, room_size))
-    air_velocities = np.zeros((num_samples, room_size))
-    pmv_values = np.zeros((num_samples, room_size))
-    ppd_values = np.zeros((num_samples, room_size))
-    
-    # Generate age groups and metabolic rates
+    # Generate age groups for potential occupants
     age_groups, ages = generate_age_groups(num_samples * room_size)
     age_groups = age_groups.reshape(num_samples, room_size)
     ages = ages.reshape(num_samples, room_size)
     
-    base_met_rates = generate_metabolic_rates(timestamps * room_size, age_groups.flatten())
-    base_met_rates = base_met_rates.reshape(num_samples, room_size)
+    # Generate base metabolic rates and clothing
+    met_rates = generate_metabolic_rates(timestamps * room_size, age_groups.flatten())
+    met_rates = met_rates.reshape(num_samples, room_size)
     clothing = generate_clothing_insulation(timestamps)
+    
+    # Initialize arrays for comfort metrics
+    indoor_temps = np.zeros((num_samples, room_size))
+    indoor_temps_no_ac = np.zeros((num_samples, room_size))
+    humidities = np.zeros((num_samples, room_size))
+    air_velocities = np.zeros((num_samples, room_size))
+    pmv_values = np.zeros((num_samples, room_size))
+    ppd_values = np.zeros((num_samples, room_size))
     
     print("Simulating thermal comfort for multiple occupants...")
     for i in range(num_samples):
@@ -503,19 +502,23 @@ def simulate_thermal_comfort(timestamps: List[datetime], room_size: int = 5,
             
             # Calculate room effects
             adj_temp, adj_humidity, vel_factor = calculate_room_effects(
-                starting_temps[i],
+                starting_temps[i],  # Use AC sensor temp as base
                 base_humidity[i],
                 curr_occupants,
                 adjusted_volume
             )
             
+            # Store the no-AC temperature (before room effects)
+            no_ac_temp = base_indoor_temp[i]
+            
             # Apply adjustments to occupied positions
             for j in range(curr_occupants):
                 indoor_temps[i,j] = adj_temp
+                indoor_temps_no_ac[i,j] = no_ac_temp  # Store the no-AC temperature
                 humidities[i,j] = adj_humidity
                 air_velocities[i,j] = base_air_velocity[i] * vel_factor
                 
-                # Calculate PMV
+                # Calculate PMV using adjusted temperatures
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     result = pmv_ppd(
@@ -523,7 +526,7 @@ def simulate_thermal_comfort(timestamps: List[datetime], room_size: int = 5,
                         tr=adj_temp,
                         vr=air_velocities[i,j],
                         rh=adj_humidity,
-                        met=base_met_rates[i,j],
+                        met=met_rates[i,j],
                         clo=clothing[i],
                         standard='ashrae',
                         limit_inputs=True
@@ -535,6 +538,7 @@ def simulate_thermal_comfort(timestamps: List[datetime], room_size: int = 5,
         'timestamps': timestamps,
         'occupancy': occupancy,
         'indoor_temps': indoor_temps,
+        'indoor_temps_no_ac': indoor_temps_no_ac,  # Add this to the returned dict
         'humidities': humidities,
         'air_velocities': air_velocities,
         'pmv_values': pmv_values,
@@ -543,7 +547,9 @@ def simulate_thermal_comfort(timestamps: List[datetime], room_size: int = 5,
         'ages': ages,
         'outdoor_temp': outdoor_temp,
         'starting_temps': starting_temps,
-        'ac_capacities': ac_capacities
+        'ac_capacities': ac_capacities,
+        'met_rates': met_rates,
+        'clothing': clothing
     }
 
 def create_analysis_plots(df: pd.DataFrame) -> None:
@@ -613,130 +619,257 @@ def create_analysis_plots(df: pd.DataFrame) -> None:
     plt.show()
 
 
-# Assuming df is your original dataframe
-def select_elderly_pmv(df):
+def find_comfort_parameters(
+    tdb: float,  # air temperature, °C
+    rh: float,   # relative humidity, %
+    vr: float,   # initial relative air velocity, m/s
+    met: float,  # metabolic rate, met
+    clo: float,  # clothing insulation, clo
+    min_mrt: float = 26.0,  # minimum acceptable MRT
+    target_pmv_min: float = -1,
+    target_pmv_max: float = 1,
+    mrt_min: float = 16,
+    mrt_max: float = 32,
+    vr_min: float = 0.1,
+    vr_max: float = 1.2,
+    max_iterations: int = 200
+) -> Tuple[float, float, float, float, int]:
     """
-    Select PMV values based on oldest occupant at each timestamp
+    Enhanced comfort parameter search that guarantees reaching target PMV range.
+    Strategy:
+    1. Try combinations of higher AC temp with varying air velocity
+    2. If that fails, gradually reduce AC temp with maximum air velocity
+    """
+    def calculate_pmv(mrt: float, air_velocity: float) -> float:
+        try:
+            results = pmv_ppd(tdb=tdb, tr=mrt, rh=rh, vr=air_velocity, met=met, clo=clo)
+            return results['pmv']
+        except Exception as e:
+            print(f"PMV calculation error for MRT={mrt}, velocity={air_velocity}: {e}")
+            return float('inf')
+
+    def find_ideal_base_mrt() -> float:
+        """Find ideal MRT with no air velocity"""
+        left = mrt_min
+        right = mrt_max
+        best_mrt = mrt_min
+        best_pmv = float('inf')
+        
+        for _ in range(50):
+            mrt = (left + right) / 2
+            current_pmv = calculate_pmv(mrt, 0.0)
+            
+            if abs(current_pmv) < abs(best_pmv):
+                best_mrt = mrt
+                best_pmv = current_pmv
+            
+            if target_pmv_min <= current_pmv <= target_pmv_max:
+                return mrt
+            elif current_pmv > target_pmv_max:
+                right = mrt
+            else:
+                left = mrt
+        
+        return best_mrt
+
+    def try_find_solution_with_velocity(mrt: float) -> Tuple[float, float, bool]:
+        """Try to find solution by adjusting velocity at given MRT"""
+        velocities = np.linspace(vr_min, vr_max, 20)  # Test 20 different velocities
+        for test_vel in velocities:
+            pmv = calculate_pmv(mrt, test_vel)
+            if target_pmv_min <= pmv <= target_pmv_max:
+                return test_vel, pmv, True
+        return vr_max, calculate_pmv(mrt, vr_max), False
+
+    # Phase 1: Find ideal base MRT and starting point
+    ideal_base_mrt = find_ideal_base_mrt()
+    current_mrt = min(ideal_base_mrt + 4, mrt_max)
+    iterations = 0
+    
+    # Phase 2: Try combinations of higher AC temp with varying air velocity
+    while iterations < max_iterations/2 and current_mrt >= min_mrt:
+        velocity, pmv, success = try_find_solution_with_velocity(current_mrt)
+        
+        if success:
+            # print(f"Solution found with combined approach after {iterations} iterations:")
+            # print(f"MRT: {current_mrt:.2f}°C, Velocity: {velocity:.2f} m/s, PMV: {pmv:.2f}")
+            return current_mrt, current_mrt, velocity, pmv, iterations
+        
+        current_mrt -= 0.25  # Small temperature step
+        iterations += 1
+    
+    # Phase 3: If no solution found, start from current temperature with max velocity
+    # and decrease temperature until target PMV is reached
+    # print("Starting final phase with maximum air velocity...")
+    current_mrt = tdb  # Start from current air temperature
+    while iterations < max_iterations:
+        pmv = calculate_pmv(current_mrt, vr_max)
+        
+        if target_pmv_min <= pmv <= target_pmv_max:
+            print(f"Solution found with maximum velocity after {iterations} iterations:")
+            print(f"MRT: {current_mrt:.2f}°C, Velocity: {vr_max:.2f} m/s, PMV: {pmv:.2f}")
+            return current_mrt, current_mrt, vr_max, pmv, iterations
+        
+        if pmv > target_pmv_max:  # Still too warm
+            current_mrt = max(current_mrt - 0.25, mrt_min)
+            if current_mrt == mrt_min and pmv > target_pmv_max:
+                # Force a solution at minimum MRT and maximum velocity
+                min_pmv = calculate_pmv(mrt_min, vr_max)
+                print(f"Forced solution at minimum MRT after {iterations} iterations:")
+                print(f"MRT: {mrt_min:.2f}°C, Velocity: {vr_max:.2f} m/s, PMV: {min_pmv:.2f}")
+                return mrt_min, mrt_min, vr_max, min_pmv, iterations
+        else:  # Too cool (shouldn't happen with proper initial temperature)
+            current_mrt = min(current_mrt + 0.25, mrt_max)
+        
+        iterations += 1
+    
+    # This point should never be reached with proper ranges
+    final_pmv = calculate_pmv(mrt_min, vr_max)
+    # print(f"Warning: Using minimum MRT and maximum velocity after {iterations} iterations:")
+    # print(f"MRT: {mrt_min:.2f}°C, Velocity: {vr_max:.2f} m/s, PMV: {final_pmv:.2f}")
+    return mrt_min, mrt_min, vr_max, final_pmv, iterations
+
+
+def select_elderly_pmv(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Select PMV values based on oldest occupant at each timestamp and calculate comfort parameters
     """
     # First identify the oldest person for each timestamp
     oldest_per_timestamp = df.groupby('Timestamp').apply(
         lambda x: x.loc[x['Age'].idxmax()]
     ).reset_index(drop=True)
     
-    # Create final dataframe with one row per timestamp
-    final_df = oldest_per_timestamp[[
-        'Total_Occupants', 'AC_SensorTemp_at_ServiceStart', 
-        'Indoor_Temperature_no_AC', 'Outdoor_Temperature','AC_Capacity', 'Humidity', 'Air_Velocity',
-        'PMV', 'PPD', 'Age_Group', 'Age', 'Hour', 'Season'
-    ]].copy()
+    # Calculate comfort parameters for each row
+    comfort_params = []
+    for _, row in oldest_per_timestamp.iterrows():
+        mrt, feeling_mrt, desired_vr, target_pmv, _ = find_comfort_parameters(
+            tdb=row['Actual_Indoor_Temp'],
+            rh=row['Humidity'],
+            vr=row['Air_Velocity'],
+            met=row['Metabolic_Rate'],
+            clo=row['Clothing_Insulation']
+        )
+        comfort_params.append({
+            'AC_Setpoint(MRT)': mrt,
+            'Feeling_MRT': feeling_mrt,
+            'Desired_AirVelocity': desired_vr,
+            'PMV_Target': target_pmv
+        })
     
-    return final_df
+    # Add comfort parameters to the dataframe
+    comfort_df = pd.DataFrame(comfort_params)
+    final_df = pd.concat([oldest_per_timestamp, comfort_df], axis=1)
+    
+    # Rename original PMV column to PMV_Initial
+    final_df = final_df.rename(columns={'PMV': 'PMV_Initial'})
 
+    # Make the AC_Setpoint(MRT) column rounded to lower integer
+    final_df['AC_Setpoint(MRT)'] = final_df['AC_Setpoint(MRT)'].apply(np.floor)
 
-# For a set PMV range, find the desired set of MRT values
-def find_mrt_for_pmv_range(df):
-    """
-    Find the MRT values that result in PMV within the target range
-    """
-    # Define target PMV range
-    target_pmv_min = -0.2
-    target_pmv_max = 0.2
+    # Round the Desired_AirVelocity to 2 decimal places
+    final_df['Desired_AirVelocity'] = final_df['Desired_AirVelocity'].round(2)
     
-    # Initialize lists to store results
-    mrt_values = []
-    pmv_values = []
+    # Select and order columns as requested
+    columns = ['Timestamp', 'Occupant_Number', 'Total_Occupants', 
+              'Actual_Indoor_Temp', 'Estimate_Indoor_Temp_due_to_Outdoor', 
+              'Outdoor_Temperature', 'AC_Capacity', 'Humidity', 'Air_Velocity', 
+              'PMV_Initial', 'AC_Setpoint(MRT)', 'Feeling_MRT', 'Desired_AirVelocity', 'PMV_Target',
+              'Metabolic_Rate', 'Clothing_Insulation', 'Age_Group', 'Age', 
+              'Hour', 'Season']
     
-    for i, row in df.iterrows():
-        tdb = row['AC_SensorTemp_at_ServiceStart']
-        rh = row['Humidity']
-        vr = row['Air_Velocity']
-        met = row['Metabolic_Rate']
-        clo = row['Clothing_Insulation']
-        
-        try:
-            mrt, pmv, _ = find_mrt_for_pmv_range(
-                tdb=tdb, rh=rh, vr=vr, met=met, clo=clo,
-                target_pmv_min=target_pmv_min, target_pmv_max=target_pmv_max
-            )
-            mrt_values.append(mrt)
-            pmv_values.append(pmv)
-        except ValueError as e:
-            mrt_values.append(np.nan)
-            pmv_values.append(np.nan)
-    
-    df['IndoorTemp_Desired'] = mrt_values
-    df['PMV_Achievable'] = pmv_values
-    
-    return df
+    return final_df[columns]
+
 
 def main():
     """
-    Main function to run the simulation
+    Main function to run the simulation twice with different PMV ranges and stack results
     """
-    # Simulation parameters
-    num_days = 7
-    num_samples = num_days * 24 * 4  # 15-minute intervals
-    room_size = 5
-    room_volume = 36  # 3x4x3m room
+    def run_simulation_with_pmv_range(pmv_min: float, pmv_max: float) -> pd.DataFrame:
+        global find_comfort_parameters
+        
+        # Store original function
+        original_func = find_comfort_parameters
+        
+        # Create modified function with specified PMV range
+        def modified_find_comfort_parameters(*args, **kwargs):
+            kwargs['target_pmv_min'] = pmv_min
+            kwargs['target_pmv_max'] = pmv_max
+            return original_func(*args, **kwargs)
+        
+        # Replace global function
+        find_comfort_parameters = modified_find_comfort_parameters
+        
+        # Run simulation
+        num_days = 365 * 10
+        num_samples = num_days * 24 * 4
+        room_size = 5
+        room_volume = 36
+        
+        start_date = datetime(2024, 3, 1)
+        timestamps = [start_date + timedelta(minutes=15 * i) for i in range(num_samples)]
+        
+        print(f"\nRunning simulation for PMV range ±{abs(pmv_min)}...")
+        results = simulate_thermal_comfort(timestamps, room_size, room_volume)
+        
+        # Create DataFrame
+        rows = []
+        for i in range(len(timestamps)):
+            curr_occupants = results['occupancy'][i]
+            for j in range(curr_occupants):
+                rows.append({
+                    'Timestamp': timestamps[i],
+                    'Occupant_Number': j + 1,
+                    'Total_Occupants': curr_occupants,
+                    'Actual_Indoor_Temp': round(results['starting_temps'][i], 2),
+                    'Estimate_Indoor_Temp_due_to_Outdoor': round(results['indoor_temps_no_ac'][i, j], 0),
+                    'Outdoor_Temperature': round(results['outdoor_temp'][i], 0),
+                    'AC_Capacity': round(results['ac_capacities'][i], 2),
+                    'Humidity': round(results['humidities'][i, j], 0),
+                    'Air_Velocity': round(results['air_velocities'][i, j], 2),
+                    'PMV': round(np.clip(results['pmv_values'][i, j], -3, 3), 2),
+                    'Metabolic_Rate': round(results['met_rates'][i, j], 2),
+                    'Clothing_Insulation': round(results['clothing'][i], 2),
+                    'Age_Group': results['age_groups'][i, j],
+                    'Age': round(results['ages'][i, j], 0),
+                    'Hour': timestamps[i].hour,
+                    'Season': get_season(timestamps[i]),
+                    'PMV_Range': f'±{abs(pmv_min)}'  # Add identifier for PMV range
+                })
+        
+        df = pd.DataFrame(rows)
+        df = df.dropna(subset=['PMV'])
+        
+        # Process with elderly PMV
+        df_processed = select_elderly_pmv(df)
+        
+        # Restore original function
+        find_comfort_parameters = original_func
+        
+        # Drop unnecessary columns and clean up
+        df_processed.drop(['Timestamp', 'Occupant_Number', 'Feeling_MRT'], axis=1, errors='ignore', inplace=True)
+        df_processed.dropna(subset=['PMV_Target'], inplace=True)
+        
+        return df_processed
     
-    # Generate timestamps
-    start_date = datetime(2024, 3, 1)
-    timestamps = [start_date + timedelta(minutes=15 * i) for i in range(num_samples)]
+    # Run for PMV ±0.5
+    df_05 = run_simulation_with_pmv_range(-0.5, 0.5)
     
-    # Run simulation
-    print("Starting thermal comfort simulation...")
-    results = simulate_thermal_comfort(timestamps, room_size, room_volume)
+    # Run for PMV ±1.0
+    df_10 = run_simulation_with_pmv_range(-1.0, 1.0)
     
-    # Create DataFrame
-    rows = []
-    for i in range(len(timestamps)):
-        curr_occupants = results['occupancy'][i]
-        for j in range(curr_occupants):
-            rows.append({
-                'Timestamp': timestamps[i],
-                'Occupant_Number': j + 1,
-                'Total_Occupants': curr_occupants,
-                'AC_SensorTemp_at_ServiceStart': round(results['starting_temps'][i], 2),
-                'Indoor_Temperature_no_AC': round(results['indoor_temps'][i, j], 2),
-                'Outdoor_Temperature': round(results['outdoor_temp'][i], 2),  
-                'AC_Capacity': round(results['ac_capacities'][i], 2),
-                'Humidity': round(results['humidities'][i, j], 2),
-                'Air_Velocity': round(results['air_velocities'][i, j], 2),
-                'PMV': round(np.clip(results['pmv_values'][i, j], -3, 3), 2),
-                # 'PPD': round(results['ppd_values'][i, j], 2),  # Uncomment if needed
-                'Metabolic_Rate': round(results['met_rates'][i, j], 2),
-                'Clothing_Insulation': round(results['clothing'][i], 2),
-                'Age_Group': results['age_groups'][i, j],
-                'Age': results['ages'][i, j],
-                'Hour': timestamps[i].hour,
-                'Season': get_season(timestamps[i])
-            })
-
+    # Combine dataframes vertically
+    df_combined = pd.concat([df_05, df_10], axis=0, ignore_index=True)
     
-    df = pd.DataFrame(rows)
-
-    # Drop the rows where PMV and PPD are NaN
-    df = df.dropna(subset=['PMV', 'PPD'])
-
+    # Save combined dataset
+    output_file = 'synthetic_ac_fan_data_combined.csv'
+    df_combined.to_csv(output_file, index=False)
+    print(f"\nCombined dataset saved to '{output_file}'")
     
-    # Create analysis plots
-    # create_analysis_plots(df)
-
-    df_elderly = select_elderly_pmv(df)
-
-    df_final = find_mrt_for_pmv_range(df_elderly)
-
-    # Save dataset
-    output_file = 'synthetic_ac_fan_data.csv'
-    df_final.to_csv(output_file, index=False)
-    print(f"\nDataset saved to '{output_file}'")
-    
-    # # Print summary statistics
-    # print("\nSummary Statistics by AC Capacity:")
-    # print(df.groupby('AC_Capacity')[['PMV', 'Indoor_Temperature_no_AC', 'PPD']].describe())
-    
-    # print("\nOccupancy Distribution by Time Period:")
-    # print(df.groupby('Hour')['Total_Occupants'].value_counts(normalize=True).mul(100).round(1))
+    # Print some summary statistics
+    print("\nSummary of combined dataset:")
+    print(f"Total samples: {len(df_combined)}")
+    # Print total size of the dataset
+    print(f"\nTotal size of the dataset: {df_combined.shape}")
 
 if __name__ == "__main__":
     main()
