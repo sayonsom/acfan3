@@ -25,86 +25,60 @@ class CustomFeatureLayer(Layer):
         super(CustomFeatureLayer, self).__init__(**kwargs)
 
     def call(self, inputs):
-        interaction = inputs[:, 0] * inputs[:, 1]
-        interaction = tf.expand_dims(interaction, -1)
+        # Square features
         squares = tf.square(inputs)
-        return concatenate([inputs, interaction, squares])
+        
+        # Simple pairwise feature (multiply adjacent features)
+        shifted = inputs[:, 1:]
+        original = inputs[:, :-1]
+        pairwise = original * shifted
+        
+        # Concatenate original features with engineered features
+        return concatenate([inputs, squares, pairwise])
+    
+    def compute_output_shape(self, input_shape):
+        # Original features + squared features + pairwise features
+        return (input_shape[0], input_shape[1] * 3 - 1)
 
     def get_config(self):
         return super(CustomFeatureLayer, self).get_config()
 
-class ComfortBasedPredictor:
-    """AC Fan predictor with comfort temperature preference"""
+class HVACPredictor:
+    """HVAC predictor for setpoint and air velocity"""
     
     def __init__(
         self,
         model_path: str,
         scaler_x_path: str,
         scaler_y_path: str,
-        temp_bounds: Tuple[float, float] = (18.0, 30.0),
+        setpoint_bounds: Tuple[float, float] = (18.0, 30.0),
         velocity_bounds: Tuple[float, float] = (0.1, 1.2)
     ):
         self.model_path = model_path
         self.scaler_x_path = scaler_x_path
         self.scaler_y_path = scaler_y_path
-        self.temp_bounds = temp_bounds
+        self.setpoint_bounds = setpoint_bounds
         self.velocity_bounds = velocity_bounds
         
         self.model = None
         self.scaler_x = None
         self.scaler_y = None
         
-        # Updated input validation bounds
+        # Input validation bounds
         self.input_bounds = {
-            'outdoor_temp': (-10.0, 50.0),     # Outdoor temperature range
-            'comfort_temp': (16.0, 32.0),      # Updated comfort temperature range based on lookup table
-            'pmv': (-3.0, 3.0)                 # PMV range
+            'total_occupants': (1, 10),
+            'indoor_temp': (16.0, 32.0),
+            'outdoor_temp': (-10.0, 50.0),
+            'ac_capacity': (0.5, 3.0),
+            'humidity': (20.0, 80.0),
+            'air_velocity': (0.1, 1.5),
+            'pmv_initial': (-3.0, 3.0),
+            'pmv_target': (-3.0, 3.0),
+            'metabolic_rate': (0.8, 2.0),
+            'clothing_insulation': (0.3, 1.5),
+            'age': (18, 80)
         }
         
-        # PMV calculation constants based on lookup table
-        self.PMV_REFERENCE_TEMP = 24.0         # Reference temperature for PMV calculation
-        self.PMV_RATE = 0.3                    # PMV change per degree Celsius (from lookup table)
-        
-    def calculate_pmv(self, comfort_temp: float) -> float:
-        """
-        Calculate PMV based on comfort temperature
-        PMV changes by 0.3 for every degree difference from reference temperature (24°C)
-        Based on empirical lookup table values
-        
-        Args:
-            comfort_temp: Desired comfort temperature in Celsius
-            
-        Returns:
-            float: Calculated PMV value
-        """
-        # Calculate temperature difference from reference (24°C)
-        temp_difference = comfort_temp - self.PMV_REFERENCE_TEMP
-        
-        # Calculate PMV (0.3 per degree difference)
-        pmv = temp_difference * self.PMV_RATE
-        
-        # Clip PMV to valid range
-        return np.clip(pmv, -3.0, 3.0)
-    
-    def get_pmv_description(self, pmv: float) -> str:
-        """
-        Get thermal sensation description based on PMV value
-        """
-        if pmv <= -2.5:
-            return "Cold"
-        elif pmv <= -1.5:
-            return "Cool"
-        elif pmv <= -0.5:
-            return "Slightly Cool"
-        elif pmv < 0.5:
-            return "Neutral"
-        elif pmv < 1.5:
-            return "Slightly Warm"
-        elif pmv < 2.5:
-            return "Warm"
-        else:
-            return "Hot"
-    
     def load(self) -> bool:
         """Load the model and scalers"""
         try:
@@ -123,46 +97,42 @@ class ComfortBasedPredictor:
             logging.error(f"Error loading model or scalers: {e}")
             return False
     
-    def validate_input(
-        self,
-        outdoor_temp: float,
-        comfort_temp: float
-    ) -> Tuple[bool, str]:
+    def validate_input(self, input_data: Dict[str, float]) -> Tuple[bool, str]:
         """Validate input values"""
-        if not self.input_bounds['outdoor_temp'][0] <= outdoor_temp <= self.input_bounds['outdoor_temp'][1]:
-            return False, f"Outdoor temperature {outdoor_temp}°C is outside valid range {self.input_bounds['outdoor_temp']}"
-            
-        if not self.input_bounds['comfort_temp'][0] <= comfort_temp <= self.input_bounds['comfort_temp'][1]:
-            return False, f"Comfort temperature {comfort_temp}°C is outside valid range {self.input_bounds['comfort_temp']}"
-            
+        for key, value in input_data.items():
+            if key in self.input_bounds:
+                min_val, max_val = self.input_bounds[key]
+                if not min_val <= value <= max_val:
+                    return False, f"{key} value {value} is outside valid range [{min_val}, {max_val}]"
         return True, ""
     
-    def predict_with_comfort(
+    def predict(
         self,
+        total_occupants: int,
+        indoor_temp: float,
         outdoor_temp: float,
-        comfort_temp: float = 24.0,
+        ac_capacity: float,
+        humidity: float,
+        air_velocity: float,
+        pmv_initial: float,
+        pmv_target: float,
+        metabolic_rate: float,
+        clothing_insulation: float,
+        age: int,
         validate: bool = True
     ) -> Dict[str, Union[float, str, bool]]:
         """
-        Make prediction based on outdoor temperature and desired comfort temperature
+        Make prediction based on input parameters
         
-        Args:
-            outdoor_temp: Outdoor temperature in Celsius
-            comfort_temp: Desired comfort temperature in Celsius (default: 24.0)
-            validate: Whether to validate inputs
-            
         Returns:
             Dictionary containing predictions and metadata
         """
         result = {
             'success': False,
-            'temperature': None,
+            'setpoint': None,
             'velocity': None,
-            'pmv': None,
-            'thermal_sensation': None,
             'message': '',
-            'input_valid': True,
-            'comfort_temp': comfort_temp
+            'input_valid': True
         }
         
         try:
@@ -172,20 +142,39 @@ class ComfortBasedPredictor:
                     result['message'] = "Failed to load model and scalers"
                     return result
             
+            # Prepare input data
+            input_data = {
+                'total_occupants': total_occupants,
+                'indoor_temp': indoor_temp,
+                'outdoor_temp': outdoor_temp,
+                'ac_capacity': ac_capacity,
+                'humidity': humidity,
+                'air_velocity': air_velocity,
+                'pmv_initial': pmv_initial,
+                'pmv_target': pmv_target,
+                'metabolic_rate': metabolic_rate,
+                'clothing_insulation': clothing_insulation,
+                'age': age
+            }
+            
             # Validate input if requested
             if validate:
-                is_valid, error_msg = self.validate_input(outdoor_temp, comfort_temp)
+                is_valid, error_msg = self.validate_input(input_data)
                 if not is_valid:
                     result['input_valid'] = False
                     result['message'] = error_msg
                     return result
             
-            # Calculate PMV based on comfort temperature
-            pmv = self.calculate_pmv(comfort_temp)
+            # Convert to numpy array
+            input_array = np.array([[
+                total_occupants, indoor_temp, outdoor_temp,
+                ac_capacity, humidity, air_velocity,
+                pmv_initial, pmv_target, metabolic_rate,
+                clothing_insulation, age
+            ]])
             
-            # Prepare input
-            input_data = np.array([[outdoor_temp, pmv]])
-            input_scaled = self.scaler_x.transform(input_data)
+            # Scale input
+            input_scaled = self.scaler_x.transform(input_array)
             
             # Make prediction
             predictions_scaled = self.model.predict(input_scaled, verbose=0)
@@ -198,15 +187,14 @@ class ComfortBasedPredictor:
             else:
                 predictions = self.scaler_y.inverse_transform(predictions_scaled)
             
-            # Get thermal sensation description
-            thermal_sensation = self.get_pmv_description(pmv)
+            # Clip predictions to bounds
+            setpoint = np.clip(predictions[0, 0], *self.setpoint_bounds)
+            velocity = np.clip(predictions[0, 1], *self.velocity_bounds)
             
             result.update({
                 'success': True,
-                'temperature': float(predictions[0, 0]),
-                'velocity': float(predictions[0, 1]),
-                'pmv': float(pmv),
-                'thermal_sensation': thermal_sensation,
+                'setpoint': float(setpoint),
+                'velocity': float(velocity),
                 'message': 'Prediction successful'
             })
             
@@ -217,7 +205,7 @@ class ComfortBasedPredictor:
             return result
 
 def main():
-    """Example usage of the ComfortBasedPredictor"""
+    """Example usage of the HVACPredictor"""
     
     # Define paths
     MODEL_DIR = 'models'
@@ -228,37 +216,52 @@ def main():
     scaler_y_path = os.path.join(SCALER_DIR, 'scaler_y.joblib')
     
     # Create predictor instance
-    predictor = ComfortBasedPredictor(
+    predictor = HVACPredictor(
         model_path=model_path,
         scaler_x_path=scaler_x_path,
         scaler_y_path=scaler_y_path
     )
     
-    # Example predictions with different comfort temperatures
+    # Example test cases
     test_cases = [
-        {'outdoor_temp': 32.0, 'comfort_temp': 24.0},  # Reference comfort (PMV = 0)
-        {'outdoor_temp': 35.0, 'comfort_temp': 20.0},  # Cool preference
-        {'outdoor_temp': 30.0, 'comfort_temp': 28.0},  # Warm preference
-        {'outdoor_temp': 33.0, 'comfort_temp': 16.0},  # Minimum comfort temp
-        {'outdoor_temp': 38.0, 'comfort_temp': 32.0},  # Maximum comfort temp
-        {'outdoor_temp': 30.0, 'comfort_temp': 40.0},  # Extreme Edge case requested by BJ
+        {
+            'total_occupants': 2,
+            'indoor_temp': 26.0,
+            'outdoor_temp': 32.0,
+            'ac_capacity': 1.5,
+            'humidity': 50.0,
+            'air_velocity': 0.3,
+            'pmv_initial': 0.5,
+            'pmv_target': 0.0,
+            'metabolic_rate': 1.2,
+            'clothing_insulation': 0.5,
+            'age': 30
+        },
+        {
+            'total_occupants': 4,
+            'indoor_temp': 28.0,
+            'outdoor_temp': 35.0,
+            'ac_capacity': 2.0,
+            'humidity': 60.0,
+            'air_velocity': 0.4,
+            'pmv_initial': 1.0,
+            'pmv_target': -0.5,
+            'metabolic_rate': 1.4,
+            'clothing_insulation': 0.6,
+            'age': 45
+        }
     ]
     
     for case in test_cases:
         logging.info(f"\nPrediction for case:")
-        logging.info(f"Outdoor Temperature: {case['outdoor_temp']}°C")
-        logging.info(f"Desired Comfort Temperature: {case['comfort_temp']}°C")
+        for key, value in case.items():
+            logging.info(f"{key}: {value}")
         
-        result = predictor.predict_with_comfort(
-            outdoor_temp=case['outdoor_temp'],
-            comfort_temp=case['comfort_temp']
-        )
+        result = predictor.predict(**case)
         
         if result['success']:
             logging.info("\nPrediction Results:")
-            logging.info(f"Calculated PMV: {result['pmv']:.2f}")
-            logging.info(f"Thermal Sensation: {result['thermal_sensation']}")
-            logging.info(f"Predicted Air Temperature: {result['temperature']:.2f}°C")
+            logging.info(f"Predicted Setpoint (MRT): {result['setpoint']:.2f}°C")
             logging.info(f"Predicted Air Velocity: {result['velocity']:.2f} m/s")
         else:
             logging.error(f"Prediction failed: {result['message']}")
