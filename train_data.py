@@ -2,14 +2,8 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Input, Dense, BatchNormalization, Dropout, 
-    Layer, Lambda, concatenate
-)
-from tensorflow.keras.callbacks import (
-    EarlyStopping, ModelCheckpoint, 
-    ReduceLROnPlateau, TensorBoard
-)
+from tensorflow.keras.layers import Input, Dense, BatchNormalization, Dropout, Layer, Lambda, concatenate
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
 from tensorflow.keras.regularizers import l2
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.preprocessing import StandardScaler
@@ -35,68 +29,71 @@ class CustomFeatureLayer(Layer):
         super(CustomFeatureLayer, self).__init__(**kwargs)
 
     def call(self, inputs):
-        # Create interaction features
-        interaction = inputs[:, 0] * inputs[:, 1]
-        interaction = tf.expand_dims(interaction, -1)
-        
-        # Create squared features
+        # Square features
         squares = tf.square(inputs)
         
-        # Concatenate all features
-        return concatenate([inputs, interaction, squares])
+        # Simple pairwise feature (multiply adjacent features)
+        # Reshape to ensure proper broadcasting
+        shifted = inputs[:, 1:]
+        original = inputs[:, :-1]
+        pairwise = original * shifted
+        
+        # Concatenate original features with engineered features
+        return concatenate([inputs, squares, pairwise])
     
+    def compute_output_shape(self, input_shape):
+        # Original features + squared features + pairwise features
+        return (input_shape[0], input_shape[1] * 3 - 1)
 
-def create_model(input_shape=(2,), reg_factor=0.005):  # Reduced regularization
+def create_model(input_shape, reg_factor=0.001):
     inputs = Input(shape=input_shape)
     
     # Feature engineering layer
     x = CustomFeatureLayer()(inputs)
     
-    # Increased capacity in first layers
+    # First block with larger capacity
     x = Dense(256, activation='relu', kernel_regularizer=l2(reg_factor))(x)
     x = BatchNormalization()(x)
-    x = Dropout(0.2)(x)  # Reduced dropout
+    x = Dropout(0.3)(x)
     
+    # Second block
     x = Dense(128, activation='relu', kernel_regularizer=l2(reg_factor))(x)
     x = BatchNormalization()(x)
     x = Dropout(0.2)(x)
     
+    # Third block
     x = Dense(64, activation='relu', kernel_regularizer=l2(reg_factor))(x)
     x = BatchNormalization()(x)
     x = Dropout(0.1)(x)
 
-    # Output layers with smaller initializer range
-    temp_output = Dense(
+    # Output layers
+    setpoint_output = Dense(
         1, 
-        name='temperature',
+        name='setpoint',
         kernel_initializer=tf.keras.initializers.RandomUniform(-0.05, 0.05)
     )(x)
     
-    vel_output = Dense(
+    velocity_output = Dense(
         1, 
         name='velocity',
         kernel_initializer=tf.keras.initializers.RandomUniform(-0.05, 0.05)
     )(x)
     
-    return Model(inputs=inputs, outputs=[temp_output, vel_output])
-
-
-
+    return Model(inputs=inputs, outputs=[setpoint_output, velocity_output])
 
 def save_training_plots(history, fold=None, save_dir='plots'):
-    """
-    Save detailed training history plots
-    """
+    """Save detailed training history plots"""
     os.makedirs(save_dir, exist_ok=True)
     
-    metrics = ['loss', 'temperature_loss', 'velocity_loss',
-               'temperature_mae', 'velocity_mae']
+    metrics = ['loss', 'setpoint_loss', 'velocity_loss',
+               'setpoint_mae', 'velocity_mae']
     
     for metric in metrics:
         plt.figure(figsize=(10, 6))
         
         # Plot training metric
-        plt.plot(history.history[metric], label=f'Training {metric}')
+        if metric in history.history:
+            plt.plot(history.history[metric], label=f'Training {metric}')
         
         # Plot validation metric
         val_metric = f'val_{metric}'
@@ -109,63 +106,62 @@ def save_training_plots(history, fold=None, save_dir='plots'):
         plt.legend()
         plt.grid(True)
         
-        # Save with fold number if doing cross-validation
         suffix = f'_fold_{fold}' if fold is not None else ''
         plt.savefig(os.path.join(save_dir, f'{metric}{suffix}.png'))
         plt.close()
 
 def prepare_data():
-    """
-    Load and prepare data with validation
-    """
+    """Load and prepare data with validation"""
     logging.info("Loading data...")
     try:
-        df = pd.read_csv('synthetic_ac_fan_data.csv')
+        df = pd.read_csv('synthetic_ac_fan_data_combined.csv')  # Update with your CSV filename
         logging.info(f"Data loaded successfully! Shape: {df.shape}")
         
-        # Basic data validation
-        assert not df.isnull().any().any(), "Dataset contains null values"
-        assert df['Outdoor_Temperature'].between(0, 50).all(), "Invalid temperature range"
-        assert df['PMV'].between(-3, 3).all(), "Invalid PMV range"
+        # Select input features
+        input_features = [
+            'Total_Occupants', 'Actual_Indoor_Temp', 'Outdoor_Temperature',
+            'AC_Capacity', 'Humidity', 'Air_Velocity', 'PMV_Initial',
+            'PMV_Target', 'Metabolic_Rate', 'Clothing_Insulation', 'Age'
+        ]
         
-        return df
+        # Basic data validation
+        assert not df[input_features].isnull().any().any(), "Dataset contains null values"
+        
+        return df, input_features
     except Exception as e:
         logging.error(f"Error loading data: {e}")
         raise
 
-def train_model(X_train, X_test, y_train, y_test, fold=None):
-    """
-    Train model with given data split
-    """
+def train_model(X_train, X_test, y_train, y_test, input_shape, fold=None):
+    """Train model with given data split"""
     # Create and compile model
-    model = create_model()
+    model = create_model(input_shape)
     
     optimizer = tf.keras.optimizers.Adam(
-    learning_rate=5e-4,  # Lower initial learning rate
-    beta_1=0.9,
-    beta_2=0.999,
-    epsilon=1e-07)
+        learning_rate=1e-3,
+        beta_1=0.9,
+        beta_2=0.999,
+        epsilon=1e-07
+    )
 
     model.compile(
         optimizer=optimizer,
         loss={
-            'temperature': 'mse',
+            'setpoint': 'mse',
             'velocity': 'mse'
         },
         metrics={
-            'temperature': ['mae', 'mse'],
+            'setpoint': ['mae', 'mse'],
             'velocity': ['mae', 'mse']
         }
     )
-
-   
     
     # Prepare callbacks
     fold_suffix = f'_fold_{fold}' if fold is not None else ''
     callbacks = [
         EarlyStopping(
             monitor='val_loss',
-            patience=25,  # Increased patience
+            patience=20,
             restore_best_weights=True,
             verbose=1
         ),
@@ -177,8 +173,8 @@ def train_model(X_train, X_test, y_train, y_test, fold=None):
         ),
         ReduceLROnPlateau(
             monitor='val_loss',
-            factor=0.1,  # More aggressive LR reduction
-            patience=15,
+            factor=0.2,
+            patience=10,
             min_lr=1e-6,
             verbose=1
         ),
@@ -191,17 +187,17 @@ def train_model(X_train, X_test, y_train, y_test, fold=None):
     history = model.fit(
         X_train,
         {
-            'temperature': y_train[:, 0],
+            'setpoint': y_train[:, 0],
             'velocity': y_train[:, 1]
         },
         validation_data=(
             X_test,
             {
-                'temperature': y_test[:, 0],
+                'setpoint': y_test[:, 0],
                 'velocity': y_test[:, 1]
             }
         ),
-        epochs=100,
+        epochs=150,
         batch_size=32,
         callbacks=callbacks,
         verbose=1
@@ -218,13 +214,13 @@ def main():
     
     try:
         # Load and prepare data
-        df = prepare_data()
+        df, input_features = prepare_data()
         
         # Prepare features and targets
-        X = df[['Outdoor_Temperature', 'PMV']].values
+        X = df[input_features].values
         y = np.column_stack((
-            df['Air_Temperature'].values,
-            df['Air_Velocity'].values
+            df['AC_Setpoint(MRT)'].values,
+            df['Desired_AirVelocity'].values
         ))
         
         # Initialize scalers
@@ -255,7 +251,8 @@ def main():
                 X_val_scaled, 
                 y_train_scaled, 
                 y_val_scaled,
-                fold
+                input_shape=(len(input_features),),
+                fold=fold
             )
             
             # Save training plots
@@ -265,7 +262,7 @@ def main():
             scores = model.evaluate(
                 X_val_scaled,
                 {
-                    'temperature': y_val_scaled[:, 0],
+                    'setpoint': y_val_scaled[:, 0],
                     'velocity': y_val_scaled[:, 1]
                 },
                 verbose=0
@@ -295,7 +292,8 @@ def main():
             X_scaled, 
             X_scaled,  # Using same data for validation
             y_scaled, 
-            y_scaled
+            y_scaled,
+            input_shape=(len(input_features),)
         )
         
         # Save final model
