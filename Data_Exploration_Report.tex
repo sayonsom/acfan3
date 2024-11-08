@@ -1,0 +1,81 @@
+\documentclass{article}%
+\usepackage[T1]{fontenc}%
+\usepackage[utf8]{inputenc}%
+\usepackage{lmodern}%
+\usepackage{textcomp}%
+\usepackage{lastpage}%
+\usepackage{graphicx}%
+%
+\title{Data Exploration Report}%
+\author{SRI{-}B Team}%
+\date{\today}%
+%
+\begin{document}%
+\normalsize%
+\maketitle%
+\section{Correlation Analysis}%
+\label{sec:CorrelationAnalysis}%
+
+%
+
+
+\begin{figure}[h!]%
+\centering%
+\includegraphics[width=250px]{correlation_matrix.png}%
+\caption{Correlation Matrix Heatmap}%
+\end{figure}
+
+%
+\section{Variance Threshold Feature Selection}%
+\label{sec:VarianceThresholdFeatureSelection}%
+
+%
+The selected features using Variance Threshold are: Total\_Occupants, Actual\_Indoor\_Temp, Estimate\_Indoor\_Temp\_due\_to\_Outdoor, Outdoor\_Temperature, AC\_Capacity, Room\_Volume, AvailableRoomVolume, Humidity, AC\_Setpoint(MRT), Desired\_AirVelocity, PMV\_Target, Clothing\_Insulation, Age, Hour%
+\section{Univariate Selection}%
+\label{sec:UnivariateSelection}%
+
+%
+The selected features using Univariate Selection are: Total\_Occupants, Actual\_Indoor\_Temp, Estimate\_Indoor\_Temp\_due\_to\_Outdoor, Outdoor\_Temperature, Humidity, PMV\_Target, Metabolic\_Rate, Clothing\_Insulation, Age, Hour%
+\section{Random Forest Feature Importance}%
+\label{sec:RandomForestFeatureImportance}%
+
+%
+
+
+\begin{figure}[h!]%
+\centering%
+\includegraphics[width=250px]{rf_feature_importance.png}%
+\caption{Random Forest Feature Importance}%
+\end{figure}
+
+%
+\section{Recursive Feature Elimination (RFE)}%
+\label{sec:RecursiveFeatureElimination(RFE)}%
+
+%
+The selected features using RFE are: Total\_Occupants, Actual\_Indoor\_Temp, Estimate\_Indoor\_Temp\_due\_to\_Outdoor, Outdoor\_Temperature, AC\_Capacity, Humidity, Air\_Velocity, PMV\_Target, Metabolic\_Rate, Clothing\_Insulation%
+\section{Lasso Regression Feature Selection}%
+\label{sec:LassoRegressionFeatureSelection}%
+
+%
+The selected features using Lasso are: Actual\_Indoor\_Temp, Outdoor\_Temperature, Humidity, Age, Hour%
+\section{Summary of Selected Features by Different Methods}%
+\label{sec:SummaryofSelectedFeaturesbyDifferentMethods}%
+
+%
+\begin{tabular}{|c|c|}%
+\hline%
+Method&Selected Features\\%
+\hline%
+Variance Threshold&Total\_Occupants, Actual\_Indoor\_Temp, Estimate\_Indoor\_Temp\_due\_to\_Outdoor, Outdoor\_Temperature, AC\_Capacity, Room\_Volume, AvailableRoomVolume, Humidity, AC\_Setpoint(MRT), Desired\_AirVelocity, PMV\_Target, Clothing\_Insulation, Age, Hour\\%
+\hline%
+Univariate Selection&Total\_Occupants, Actual\_Indoor\_Temp, Estimate\_Indoor\_Temp\_due\_to\_Outdoor, Outdoor\_Temperature, Humidity, PMV\_Target, Metabolic\_Rate, Clothing\_Insulation, Age, Hour\\%
+\hline%
+Random Forest Importance&PMV\_Target, Actual\_Indoor\_Temp, Clothing\_Insulation, Metabolic\_Rate, Humidity, AvailableRoomVolume, Age, Room\_Volume, Hour, Outdoor\_Temperature\\%
+\hline%
+RFE&Total\_Occupants, Actual\_Indoor\_Temp, Estimate\_Indoor\_Temp\_due\_to\_Outdoor, Outdoor\_Temperature, AC\_Capacity, Humidity, Air\_Velocity, PMV\_Target, Metabolic\_Rate, Clothing\_Insulation\\%
+\hline%
+Lasso&Actual\_Indoor\_Temp, Outdoor\_Temperature, Humidity, Age, Hour\\%
+\hline%
+\end{tabular}%
+\end{document}

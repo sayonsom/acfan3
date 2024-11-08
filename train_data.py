@@ -14,8 +14,8 @@ from datetime import datetime
 import logging
 
 # Set random seeds for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
+np.random.seed(2024)
+tf.random.set_seed(2024)
 
 # Configure logging
 logging.basicConfig(
@@ -24,60 +24,111 @@ logging.basicConfig(
 )
 
 class CustomFeatureLayer(Layer):
-    """Custom layer for feature engineering"""
+    """Custom layer for feature engineering with proper dimension handling"""
     def __init__(self, **kwargs):
         super(CustomFeatureLayer, self).__init__(**kwargs)
 
     def call(self, inputs):
+        # Ensure inputs are rank 2
+        if tf.rank(inputs) != 2:
+            raise ValueError(f"Expected rank 2 input, got rank {tf.rank(inputs)}")
+            
         # Square features
         squares = tf.square(inputs)
         
-        # Simple pairwise feature (multiply adjacent features)
-        # Reshape to ensure proper broadcasting
-        shifted = inputs[:, 1:]
-        original = inputs[:, :-1]
-        pairwise = original * shifted
-        
-        # Concatenate original features with engineered features
-        return concatenate([inputs, squares, pairwise])
-    
-    def compute_output_shape(self, input_shape):
-        # Original features + squared features + pairwise features
-        return (input_shape[0], input_shape[1] * 3 - 1)
+        # Create pairwise interactions more safely
+        input_shape = tf.shape(inputs)
+        if input_shape[1] > 1:  # Only create pairwise if we have at least 2 features
+            # Take first n-1 features and multiply with next feature
+            left = inputs[:, :-1]
+            right = inputs[:, 1:]
+            pairwise = left * right
+            # Concatenate all features
+            return tf.concat([inputs, squares, pairwise], axis=1)
+        else:
+            # If we only have one feature, just return original and squared
+            return tf.concat([inputs, squares], axis=1)
 
-def create_model(input_shape, reg_factor=0.001):
+def create_model(input_shape, reg_factor=0.0005):  # Reduced regularization
     inputs = Input(shape=input_shape)
     
     # Feature engineering layer
     x = CustomFeatureLayer()(inputs)
     
-    # First block with larger capacity
+    # Deeper architecture with residual connections
+    x1 = Dense(512, activation='relu', kernel_regularizer=l2(reg_factor))(x)
+    x1 = BatchNormalization()(x1)
+    x1 = Dropout(0.4)(x1)
+    
+    x2 = Dense(256, activation='relu', kernel_regularizer=l2(reg_factor))(x1)
+    x2 = BatchNormalization()(x2)
+    x2 = Dropout(0.3)(x2)
+    
+    # Residual connection
+    x2 = concatenate([x2, x1])
+    
+    x3 = Dense(128, activation='relu', kernel_regularizer=l2(reg_factor))(x2)
+    x3 = BatchNormalization()(x3)
+    x3 = Dropout(0.2)(x3)
+    
+    # Final dense layers for each output
+    setpoint_hidden = Dense(64, activation='relu', name='setpoint_hidden')(x3)
+    velocity_hidden = Dense(64, activation='relu', name='velocity_hidden')(x3)
+    
+    # Output layers with appropriate activation functions
+    setpoint_output = Dense(1, name='setpoint')(setpoint_hidden)
+    velocity_output = Dense(1, name='velocity', activation='sigmoid')(velocity_hidden)
+    
+    return Model(inputs=inputs, outputs=[setpoint_output, velocity_output])
+
+def custom_loss():
+    mse = tf.keras.losses.MeanSquaredError()
+    
+    def combined_loss(y_true, y_pred):
+        # MSE loss
+        mse_loss = mse(y_true, y_pred)
+        
+        # Add penalty for large changes in predictions
+        smoothness_loss = tf.reduce_mean(tf.square(y_pred[:, 1:] - y_pred[:, :-1]))
+        
+        return mse_loss + 0.1 * smoothness_loss
+    
+    return combined_loss
+
+def create_model(input_shape, reg_factor=0.0005):
+    """Create model with improved error handling"""
+    inputs = Input(shape=input_shape)
+    
+    # Feature engineering layer with error handling
+    try:
+        x = CustomFeatureLayer()(inputs)
+    except Exception as e:
+        logging.error(f"Error in CustomFeatureLayer: {e}")
+        # Fallback to just using original inputs if feature engineering fails
+        x = inputs
+    
+    # First block
     x = Dense(256, activation='relu', kernel_regularizer=l2(reg_factor))(x)
     x = BatchNormalization()(x)
     x = Dropout(0.3)(x)
     
-    # Second block
-    x = Dense(128, activation='relu', kernel_regularizer=l2(reg_factor))(x)
-    x = BatchNormalization()(x)
-    x = Dropout(0.2)(x)
+    # Second block with residual connection
+    x2 = Dense(128, activation='relu', kernel_regularizer=l2(reg_factor))(x)
+    x2 = BatchNormalization()(x2)
+    x2 = Dropout(0.2)(x2)
     
     # Third block
-    x = Dense(64, activation='relu', kernel_regularizer=l2(reg_factor))(x)
-    x = BatchNormalization()(x)
-    x = Dropout(0.1)(x)
-
-    # Output layers
-    setpoint_output = Dense(
-        1, 
-        name='setpoint',
-        kernel_initializer=tf.keras.initializers.RandomUniform(-0.05, 0.05)
-    )(x)
+    x3 = Dense(64, activation='relu', kernel_regularizer=l2(reg_factor))(x2)
+    x3 = BatchNormalization()(x3)
+    x3 = Dropout(0.1)(x3)
     
-    velocity_output = Dense(
-        1, 
-        name='velocity',
-        kernel_initializer=tf.keras.initializers.RandomUniform(-0.05, 0.05)
-    )(x)
+    # Separate branches for setpoint and velocity
+    setpoint_hidden = Dense(32, activation='relu', kernel_regularizer=l2(reg_factor))(x3)
+    velocity_hidden = Dense(32, activation='relu', kernel_regularizer=l2(reg_factor))(x3)
+    
+    # Output layers
+    setpoint_output = Dense(1, name='setpoint')(setpoint_hidden)
+    velocity_output = Dense(1, name='velocity')(velocity_hidden)
     
     return Model(inputs=inputs, outputs=[setpoint_output, velocity_output])
 
@@ -110,39 +161,12 @@ def save_training_plots(history, fold=None, save_dir='plots'):
         plt.savefig(os.path.join(save_dir, f'{metric}{suffix}.png'))
         plt.close()
 
-def prepare_data():
-    """Load and prepare data with validation"""
-    logging.info("Loading data...")
-    try:
-        df = pd.read_csv('synthetic_ac_fan_data_combined.csv')  # Update with your CSV filename
-        logging.info(f"Data loaded successfully! Shape: {df.shape}")
-        
-        # Select input features
-        input_features = [
-            'Total_Occupants', 'Actual_Indoor_Temp', 'Outdoor_Temperature',
-            'AC_Capacity', 'Humidity', 'Air_Velocity', 'PMV_Initial',
-            'PMV_Target', 'Metabolic_Rate', 'Clothing_Insulation', 'Age'
-        ]
-        
-        # Basic data validation
-        assert not df[input_features].isnull().any().any(), "Dataset contains null values"
-        
-        return df, input_features
-    except Exception as e:
-        logging.error(f"Error loading data: {e}")
-        raise
-
 def train_model(X_train, X_test, y_train, y_test, input_shape, fold=None):
-    """Train model with given data split"""
-    # Create and compile model
+    """Train model with improved error handling and simpler loss functions"""
     model = create_model(input_shape)
     
-    optimizer = tf.keras.optimizers.Adam(
-        learning_rate=1e-3,
-        beta_1=0.9,
-        beta_2=0.999,
-        epsilon=1e-07
-    )
+    # Simple Adam optimizer with fixed learning rate initially
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
     model.compile(
         optimizer=optimizer,
@@ -151,17 +175,17 @@ def train_model(X_train, X_test, y_train, y_test, input_shape, fold=None):
             'velocity': 'mse'
         },
         metrics={
-            'setpoint': ['mae', 'mse'],
-            'velocity': ['mae', 'mse']
+            'setpoint': ['mae'],
+            'velocity': ['mae']
         }
     )
     
-    # Prepare callbacks
+    # Simplified callbacks
     fold_suffix = f'_fold_{fold}' if fold is not None else ''
     callbacks = [
         EarlyStopping(
             monitor='val_loss',
-            patience=20,
+            patience=15,
             restore_best_weights=True,
             verbose=1
         ),
@@ -177,33 +201,59 @@ def train_model(X_train, X_test, y_train, y_test, input_shape, fold=None):
             patience=10,
             min_lr=1e-6,
             verbose=1
-        ),
-        TensorBoard(
-            log_dir=f'logs/fit/{datetime.now().strftime("%Y%m%d-%H%M%S")}'
         )
     ]
     
-    # Train model
-    history = model.fit(
-        X_train,
-        {
-            'setpoint': y_train[:, 0],
-            'velocity': y_train[:, 1]
-        },
-        validation_data=(
-            X_test,
+    # Train with smaller batch size initially
+    try:
+        history = model.fit(
+            X_train,
             {
-                'setpoint': y_test[:, 0],
-                'velocity': y_test[:, 1]
-            }
-        ),
-        epochs=150,
-        batch_size=32,
-        callbacks=callbacks,
-        verbose=1
-    )
-    
-    return model, history
+                'setpoint': y_train[:, 0],
+                'velocity': y_train[:, 1]
+            },
+            validation_data=(
+                X_test,
+                {
+                    'setpoint': y_test[:, 0],
+                    'velocity': y_test[:, 1]
+                }
+            ),
+            epochs=15,
+            batch_size=32,  # Reduced batch size
+            callbacks=callbacks,
+            verbose=1
+        )
+        return model, history
+    except Exception as e:
+        logging.error(f"Error during training: {e}")
+        raise
+def prepare_data():
+    """Load and prepare data with minimal but important features"""
+    logging.info("Loading data...")
+    try:
+        df = pd.read_csv('synthetic_ac_fan_data.csv')
+        logging.info(f"Data loaded successfully! Shape: {df.shape}")
+        
+        # Reduced set of most important features
+        input_features = [
+            'Actual_Indoor_Temp',
+            'Outdoor_Temperature',
+            'Room_Volume',
+            'AC_Capacity',
+            'Humidity',
+            'PMV_Target',
+            'Hour'
+        ]
+        
+        # Basic data validation
+        assert not df[input_features].isnull().any().any(), "Dataset contains null values"
+        
+        return df, input_features
+    except Exception as e:
+        logging.error(f"Error loading data: {e}")
+        raise
+
 
 def main():
     # Create necessary directories

@@ -43,8 +43,8 @@ class CustomFeatureLayer(Layer):
     def get_config(self):
         return super(CustomFeatureLayer, self).get_config()
 
-class HVACPredictor:
-    """HVAC predictor for setpoint and air velocity"""
+class ACFanPredictor:
+    """ACFan predictor for setpoint and air velocity"""
     
     def __init__(
         self,
@@ -72,7 +72,6 @@ class HVACPredictor:
             'ac_capacity': (0.5, 3.0),
             'humidity': (20.0, 80.0),
             'air_velocity': (0.1, 1.5),
-            'pmv_initial': (-3.0, 3.0),
             'pmv_target': (-3.0, 3.0),
             'metabolic_rate': (0.8, 2.0),
             'clothing_insulation': (0.3, 1.5),
@@ -114,7 +113,6 @@ class HVACPredictor:
         ac_capacity: float,
         humidity: float,
         air_velocity: float,
-        pmv_initial: float,
         pmv_target: float,
         metabolic_rate: float,
         clothing_insulation: float,
@@ -150,7 +148,6 @@ class HVACPredictor:
                 'ac_capacity': ac_capacity,
                 'humidity': humidity,
                 'air_velocity': air_velocity,
-                'pmv_initial': pmv_initial,
                 'pmv_target': pmv_target,
                 'metabolic_rate': metabolic_rate,
                 'clothing_insulation': clothing_insulation,
@@ -169,7 +166,7 @@ class HVACPredictor:
             input_array = np.array([[
                 total_occupants, indoor_temp, outdoor_temp,
                 ac_capacity, humidity, air_velocity,
-                pmv_initial, pmv_target, metabolic_rate,
+                pmv_target, metabolic_rate,
                 clothing_insulation, age
             ]])
             
@@ -204,8 +201,127 @@ class HVACPredictor:
             result['message'] = f"Error during prediction: {str(e)}"
             return result
 
+
+def generate_sensitivity_ranges():
+    """Generate test ranges for each parameter"""
+    return {
+        'total_occupants': list(range(1, 6)),  # 1 to 5 occupants
+        'indoor_temp': np.arange(22.0, 32.0, 1.0),  # 22°C to 31°C
+        'outdoor_temp': np.arange(25.0, 45.0, 2.0),  # 25°C to 43°C
+        'ac_capacity': [1.0, 1.5, 2.0],  # Common AC capacities
+        'humidity': np.arange(30.0, 75.0, 5.0),  # 30% to 70%
+        'air_velocity': np.arange(0.1, 1.3, 0.1),  # 0.1 to 1.2 m/s
+        'pmv_target': [-1.0, -0.5, 0.0, 0.5, 1.0],  # Common PMV targets
+        'metabolic_rate': np.arange(0.8, 2.1, 0.2),  # 0.8 to 2.0 met
+        'clothing_insulation': np.arange(0.3, 1.6, 0.1),  # 0.3 to 1.5 clo
+        'age': [25, 35, 45, 55, 65]  # Representative age groups
+    }
+
+def perform_sensitivity_analysis(predictor: ACFanPredictor) -> pd.DataFrame:
+    """
+    Perform sensitivity analysis by varying each parameter while keeping others constant
+    """
+    # Base case (comfortable conditions)
+    base_case = {
+        'total_occupants': 2,
+        'indoor_temp': 26.0,
+        'outdoor_temp': 32.0,
+        'ac_capacity': 1.5,
+        'humidity': 50.0,
+        'air_velocity': 0.3,
+        'pmv_target': 0.0,
+        'metabolic_rate': 1.2,
+        'clothing_insulation': 0.5,
+        'age': 35
+    }
+    
+    # Get test ranges
+    sensitivity_ranges = generate_sensitivity_ranges()
+    
+    # Store results
+    results = []
+    
+    # Test each parameter
+    for param in base_case.keys():
+        logging.info(f"\nTesting sensitivity for: {param}")
+        test_range = sensitivity_ranges[param]
+        
+        for test_value in test_range:
+            # Create test case with current parameter value
+            test_case = base_case.copy()
+            test_case[param] = test_value
+            
+            # Make prediction
+            result = predictor.predict(**test_case)
+            
+            if result['success']:
+                results.append({
+                    'parameter': param,
+                    'test_value': test_value,
+                    'setpoint': result['setpoint'],
+                    'velocity': result['velocity'],
+                    'indoor_temp': test_case['indoor_temp'],
+                    'outdoor_temp': test_case['outdoor_temp'],
+                    'humidity': test_case['humidity'],
+                    'pmv_target': test_case['pmv_target']
+                })
+            else:
+                logging.warning(f"Prediction failed for {param} = {test_value}: {result['message']}")
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(results)
+    
+    # Calculate additional metrics
+    df['setpoint_delta'] = df.groupby('parameter')['setpoint'].transform(lambda x: x - x.mean())
+    df['velocity_delta'] = df.groupby('parameter')['velocity'].transform(lambda x: x - x.mean())
+    
+    # Add percentage changes
+    df['setpoint_pct_change'] = df.groupby('parameter')['setpoint'].transform(
+        lambda x: (x - x.iloc[0]) / x.iloc[0] * 100
+    )
+    df['velocity_pct_change'] = df.groupby('parameter')['velocity'].transform(
+        lambda x: (x - x.iloc[0]) / x.iloc[0] * 100
+    )
+    
+    return df
+
+def save_sensitivity_results(df: pd.DataFrame, output_dir: str = 'sensitivity_results'):
+    """Save sensitivity analysis results in multiple formats"""
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save detailed CSV
+    detail_path = os.path.join(output_dir, f'sensitivity_analysis_detail_{timestamp}.csv')
+    df.to_csv(detail_path, index=False)
+    
+    # Create summary DataFrame
+    summary_data = []
+    for param in df['parameter'].unique():
+        param_data = df[df['parameter'] == param]
+        summary_data.append({
+            'parameter': param,
+            'min_setpoint': param_data['setpoint'].min(),
+            'max_setpoint': param_data['setpoint'].max(),
+            'setpoint_range': param_data['setpoint'].max() - param_data['setpoint'].min(),
+            'min_velocity': param_data['velocity'].min(),
+            'max_velocity': param_data['velocity'].max(),
+            'velocity_range': param_data['velocity'].max() - param_data['velocity'].min(),
+            'max_setpoint_pct_change': param_data['setpoint_pct_change'].abs().max(),
+            'max_velocity_pct_change': param_data['velocity_pct_change'].abs().max()
+        })
+    
+    summary_df = pd.DataFrame(summary_data)
+    summary_path = os.path.join(output_dir, f'sensitivity_analysis_summary_{timestamp}.csv')
+    summary_df.to_csv(summary_path, index=False)
+    
+    logging.info(f"\nSensitivity analysis results saved:")
+    logging.info(f"Detailed results: {detail_path}")
+    logging.info(f"Summary results: {summary_path}")
+    
+    return detail_path, summary_path
+
 def main():
-    """Example usage of the HVACPredictor"""
+    """Perform sensitivity analysis"""
     
     # Define paths
     MODEL_DIR = 'models'
@@ -216,55 +332,26 @@ def main():
     scaler_y_path = os.path.join(SCALER_DIR, 'scaler_y.joblib')
     
     # Create predictor instance
-    predictor = HVACPredictor(
+    predictor = ACFanPredictor(
         model_path=model_path,
         scaler_x_path=scaler_x_path,
         scaler_y_path=scaler_y_path
     )
     
-    # Example test cases
-    test_cases = [
-        {
-            'total_occupants': 2,
-            'indoor_temp': 26.0,
-            'outdoor_temp': 32.0,
-            'ac_capacity': 1.5,
-            'humidity': 50.0,
-            'air_velocity': 0.3,
-            'pmv_initial': 0.5,
-            'pmv_target': 0.0,
-            'metabolic_rate': 1.2,
-            'clothing_insulation': 0.5,
-            'age': 30
-        },
-        {
-            'total_occupants': 4,
-            'indoor_temp': 28.0,
-            'outdoor_temp': 35.0,
-            'ac_capacity': 2.0,
-            'humidity': 60.0,
-            'air_velocity': 0.4,
-            'pmv_initial': 1.0,
-            'pmv_target': -0.5,
-            'metabolic_rate': 1.4,
-            'clothing_insulation': 0.6,
-            'age': 45
-        }
-    ]
+    # Perform sensitivity analysis
+    logging.info("Starting sensitivity analysis...")
+    results_df = perform_sensitivity_analysis(predictor)
     
-    for case in test_cases:
-        logging.info(f"\nPrediction for case:")
-        for key, value in case.items():
-            logging.info(f"{key}: {value}")
-        
-        result = predictor.predict(**case)
-        
-        if result['success']:
-            logging.info("\nPrediction Results:")
-            logging.info(f"Predicted Setpoint (MRT): {result['setpoint']:.2f}°C")
-            logging.info(f"Predicted Air Velocity: {result['velocity']:.2f} m/s")
-        else:
-            logging.error(f"Prediction failed: {result['message']}")
+    # Save results
+    detail_path, summary_path = save_sensitivity_results(results_df)
+    
+    # Print some key findings
+    logging.info("\nKey Sensitivity Findings:")
+    for param in results_df['parameter'].unique():
+        param_data = results_df[results_df['parameter'] == param]
+        logging.info(f"\nParameter: {param}")
+        logging.info(f"Setpoint range: {param_data['setpoint'].min():.2f}°C to {param_data['setpoint'].max():.2f}°C")
+        logging.info(f"Velocity range: {param_data['velocity'].min():.2f} to {param_data['velocity'].max():.2f} m/s")
 
 if __name__ == "__main__":
     main()
